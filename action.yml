@@ -1,0 +1,58 @@
+name: 'Archyl Conformance Check'
+description: 'Run architecture conformance rules against changed files and annotate violations on pull requests'
+branding:
+  icon: 'shield'
+  color: 'purple'
+
+inputs:
+  api-url:
+    description: 'Archyl API base URL'
+    required: false
+    default: 'https://api.archyl.com'
+  api-key:
+    description: 'Archyl API key with write scope'
+    required: true
+  organization-id:
+    description: 'Archyl organization UUID'
+    required: true
+  project-id:
+    description: 'Archyl project UUID'
+    required: true
+  fail-on:
+    description: 'Minimum severity that fails the check: "error", "warning", or "none"'
+    required: false
+    default: 'error'
+  comment-on-pr:
+    description: 'Post a summary comment on the pull request (requires GITHUB_TOKEN)'
+    required: false
+    default: 'true'
+  github-token:
+    description: 'GitHub token for PR comments (defaults to GITHUB_TOKEN)'
+    required: false
+    default: '${{ github.token }}'
+  max-file-lines:
+    description: 'Maximum lines to send per file (imports + signatures). Reduces token usage.'
+    required: false
+    default: '200'
+  chunk-size:
+    description: 'Number of files to send per API call (for large diffs)'
+    required: false
+    default: '20'
+
+outputs:
+  check-id:
+    description: 'UUID of the conformance check'
+  total-violations:
+    description: 'Total number of violations found'
+  errors:
+    description: 'Number of error-level violations'
+  warnings:
+    description: 'Number of warning-level violations'
+  infos:
+    description: 'Number of info-level violations'
+  status:
+    description: 'Check result: "pass" or "fail"'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'
