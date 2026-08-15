@@ -13,7 +13,6 @@ async function run() {
   const commentOnPr = core.getInput("comment-on-pr") !== "false";
   const githubToken = core.getInput("github-token");
   const maxFileLines = parseInt(core.getInput("max-file-lines") || "200", 10);
-  const chunkSize = parseInt(core.getInput("chunk-size") || "20", 10);
 
   const http = new HttpClient("archyl-conformance-check-action");
   const headers = {
@@ -40,68 +39,38 @@ async function run() {
   // Step 2: Read file contents (first N lines per file)
   const fileContents = readFileContents(changedFiles, maxFileLines);
 
-  // Step 3: Run conformance check (chunked if needed)
+  // Step 3: Run the conformance check. The API evaluates the whole diff in a
+  // single call and returns the full report, so there is one check per run.
   core.info("Running conformance check...");
 
-  let checkId = null;
-  const chunks = chunkArray(changedFiles, chunkSize);
+  const context = github.context;
+  const body = {
+    commitSha: context.payload.pull_request ? context.payload.pull_request.head.sha : context.sha,
+    baseSha: context.payload.pull_request ? context.payload.pull_request.base.sha : context.payload.before || "",
+    branch: context.payload.pull_request ? context.payload.pull_request.head.ref : context.ref.replace(/^refs\/heads\//, ""),
+    changedFiles,
+    fileContents,
+  };
 
-  for (let i = 0; i < chunks.length; i++) {
-    const chunk = chunks[i];
-    const chunkContents = {};
-    for (const file of chunk) {
-      if (fileContents[file.path]) {
-        chunkContents[file.path] = fileContents[file.path];
-      }
-    }
+  const url = `${apiUrl}/api/v1/projects/${projectId}/conformance/check`;
+  const response = await http.postJson(url, body, headers);
 
-    const body = {
-      projectId,
-      changedFiles: chunk,
-      fileContents: chunkContents,
-    };
-    if (checkId) {
-      body.checkId = checkId;
-    }
-
-    const url = `${apiUrl}/api/v1/conformance/check`;
-    const response = await http.postJson(url, body, headers);
-
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      core.setFailed(`Conformance check failed: ${response.statusCode} ${JSON.stringify(response.result)}`);
-      return;
-    }
-
-    checkId = response.result && response.result.id;
-    if (!checkId) {
-      core.setFailed("No check ID returned from conformance check");
-      return;
-    }
-
-    if (chunks.length > 1) {
-      core.info(`  Chunk ${i + 1}/${chunks.length} sent (${chunk.length} files)`);
-    }
-  }
-
-  core.info(`Conformance check completed: ${checkId}`);
-
-  // Step 4: Get the full report
-  const reportUrl = `${apiUrl}/api/v1/conformance/${checkId}/report`;
-  const reportResponse = await http.getJson(reportUrl, headers);
-
-  if (reportResponse.statusCode < 200 || reportResponse.statusCode >= 300) {
-    core.setFailed(`Failed to fetch conformance report: ${reportResponse.statusCode}`);
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    core.setFailed(`Conformance check failed: ${response.statusCode} ${JSON.stringify(response.result)}`);
     return;
   }
 
-  const report = reportResponse.result;
+  const report = response.result || {};
+  const checkId = report.check && report.check.id;
   const violations = report.violations || [];
 
-  // Step 5: Count by severity
+  core.info(`Conformance check completed: ${checkId}`);
+
+  // Step 4: Count by severity. Archyl grades violations critical/high/medium/low;
+  // the action reports them on the error/warning/info scale used by `fail-on`.
   const counts = { error: 0, warning: 0, info: 0 };
   for (const v of violations) {
-    const severity = v.severity || "info";
-    counts[severity] = (counts[severity] || 0) + 1;
+    counts[severityLevel(v.severity)]++;
   }
 
   const total = violations.length;
@@ -112,25 +81,29 @@ async function run() {
   core.setOutput("warnings", counts.warning);
   core.setOutput("infos", counts.info);
 
-  // Step 6: Create annotations
+  // Step 5: Create annotations
+  const ruleNames = ruleNameMap(report.rules);
+
   for (const v of violations) {
     const annotation = {
-      file: v.file || undefined,
-      startLine: v.line || undefined,
+      file: v.filePath || undefined,
+      startLine: v.lineStart || undefined,
+      endLine: v.lineEnd || undefined,
     };
 
-    const message = `[${v.ruleName || "conformance"}] ${v.message}`;
+    const message = `[${ruleNames[v.ruleId] || "conformance"}] ${violationMessage(v)}`;
 
-    if (v.severity === "error") {
+    const level = severityLevel(v.severity);
+    if (level === "error") {
       core.error(message, annotation);
-    } else if (v.severity === "warning") {
+    } else if (level === "warning") {
       core.warning(message, annotation);
     } else {
       core.notice(message, annotation);
     }
   }
 
-  // Step 7: Log summary
+  // Step 6: Log summary
   core.info("");
   core.info("+" + "-".repeat(44) + "+");
   core.info(`|  Conformance Check: ${total === 0 ? "PASS" : `${total} violation(s)`}`.padEnd(45) + "|");
@@ -141,7 +114,7 @@ async function run() {
   core.info(`  Infos:    ${counts.info}`);
   core.info("");
 
-  // Step 8: Write job summary
+  // Step 7: Write job summary
   const status = shouldFail(failOn, counts) ? "fail" : "pass";
   const emoji = status === "pass" ? "\u2705" : "\u274c";
 
@@ -160,12 +133,11 @@ async function run() {
     ];
 
     for (const v of violations) {
-      const severityIcon = v.severity === "error" ? "\ud83d\udd34" : v.severity === "warning" ? "\ud83d\udfe0" : "\ud83d\udfe2";
       tableRows.push([
-        `${severityIcon} ${v.severity}`,
-        v.ruleName || "-",
-        v.file ? `\`${v.file}\`` : "-",
-        v.message || "-",
+        `${severityIcon(v.severity)} ${v.severity}`,
+        ruleNames[v.ruleId] || "-",
+        v.filePath ? `\`${v.filePath}\`` : "-",
+        violationMessage(v) || "-",
       ]);
     }
 
@@ -177,12 +149,12 @@ async function run() {
 
   core.setOutput("status", status);
 
-  // Step 9: Comment on PR
+  // Step 8: Comment on PR
   if (commentOnPr && github.context.payload.pull_request && githubToken) {
-    await commentOnPullRequest(githubToken, violations, counts, changedFiles.length, checkId, status);
+    await commentOnPullRequest(githubToken, violations, ruleNames, counts, changedFiles.length, status);
   }
 
-  // Step 10: Fail if needed
+  // Step 9: Fail if needed
   if (status === "fail") {
     core.setFailed(
       `Conformance check failed: ${counts.error} error(s), ${counts.warning} warning(s) (fail-on: ${failOn})`
@@ -274,12 +246,32 @@ function readFileContents(changedFiles, maxLines) {
   return contents;
 }
 
-function chunkArray(array, size) {
-  const chunks = [];
-  for (let i = 0; i < array.length; i += size) {
-    chunks.push(array.slice(i, i + size));
+function ruleNameMap(rules) {
+  const names = {};
+  for (const rule of rules || []) {
+    names[rule.id] = rule.name;
   }
-  return chunks;
+  return names;
+}
+
+/**
+ * Map an Archyl severity (critical, high, medium, low) onto the error/warning/info
+ * scale that the `fail-on` input and the action outputs are expressed in.
+ * critical and high both map to error, which matches the API's own `summary.passed`.
+ */
+function severityLevel(severity) {
+  if (severity === "critical" || severity === "high") return "error";
+  if (severity === "medium") return "warning";
+  return "info";
+}
+
+function severityIcon(severity) {
+  const level = severityLevel(severity);
+  return level === "error" ? "🔴" : level === "warning" ? "🟠" : "🟢";
+}
+
+function violationMessage(v) {
+  return v.suggestion ? `${v.title} — ${v.suggestion}` : v.title;
 }
 
 function shouldFail(failOn, counts) {
@@ -289,7 +281,7 @@ function shouldFail(failOn, counts) {
   return counts.error > 0;
 }
 
-async function commentOnPullRequest(token, violations, counts, filesChecked, checkId, status) {
+async function commentOnPullRequest(token, violations, ruleNames, counts, filesChecked, status) {
   try {
     const octokit = github.getOctokit(token);
     const context = github.context;
@@ -305,8 +297,7 @@ async function commentOnPullRequest(token, violations, counts, filesChecked, che
       body += "|----------|------|------|---------|\n";
 
       for (const v of violations.slice(0, 25)) {
-        const icon = v.severity === "error" ? "\ud83d\udd34" : v.severity === "warning" ? "\ud83d\udfe0" : "\ud83d\udfe2";
-        body += `| ${icon} ${v.severity} | ${v.ruleName || "-"} | \`${v.file || "-"}\` | ${v.message || "-"} |\n`;
+        body += `| ${severityIcon(v.severity)} ${v.severity} | ${ruleNames[v.ruleId] || "-"} | \`${v.filePath || "-"}\` | ${violationMessage(v) || "-"} |\n`;
       }
 
       if (total > 25) {

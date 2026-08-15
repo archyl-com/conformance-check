@@ -97,10 +97,24 @@ jobs:
 
 1. **Detects changed files** from the pull request or push event via the GitHub API
 2. **Reads file contents** (first 200 lines per file — imports, types, signatures)
-3. **Sends to Archyl** in chunks of 20 files for conformance rule evaluation
+3. **Sends the diff to Archyl** in a single call, which runs the conformance rules and returns the full report
 4. **Creates annotations** on the exact files where violations occur
 5. **Comments on the PR** with a summary table of all violations
 6. **Fails the check** if violations exceed the configured severity threshold
+
+## Severity Levels
+
+Archyl grades violations `critical`, `high`, `medium`, and `low`. The action reports them
+on the scale that `fail-on` and the outputs use:
+
+| Archyl severity | Action level |
+|---|---|
+| `critical`, `high` | `error` |
+| `medium` | `warning` |
+| `low` | `info` |
+
+So the default `fail-on: error` blocks a PR on exactly the violations Archyl itself
+counts as a failed check.
 
 ## Inputs
 
@@ -114,7 +128,7 @@ jobs:
 | `comment-on-pr` | No | `true` | Post a summary comment on the PR |
 | `github-token` | No | `${{ github.token }}` | Token for PR comments and file listing |
 | `max-file-lines` | No | `200` | Max lines to send per file (reduces token usage) |
-| `chunk-size` | No | `20` | Files per API call (for large diffs) |
+| `chunk-size` | No | `20` | Deprecated and ignored — the whole diff is sent in one call |
 
 ## Outputs
 
@@ -133,8 +147,8 @@ The action posts (or updates) a comment on the pull request with a table of viol
 
 | Severity | Rule | File | Message |
 |----------|------|------|---------|
-| :red_circle: error | No Direct DB Access | `handlers/user.go` | Handler directly imports database package |
-| :orange_circle: warning | OpenAPI Required | `services/payment.go` | Service has no linked API contract |
+| :red_circle: critical | No Direct DB Access | `handlers/user.go` | Handler directly imports database package — call the repository instead |
+| :orange_circle: medium | OpenAPI Required | `services/payment.go` | Service has no linked API contract — attach an OpenAPI spec |
 
 ## Annotations
 

@@ -35,7 +35,7 @@ inputs:
     required: false
     default: '200'
   chunk-size:
-    description: 'Number of files to send per API call (for large diffs)'
+    description: 'Deprecated and ignored. The API evaluates the whole diff in a single call.'
     required: false
     default: '20'
 
